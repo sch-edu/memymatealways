@@ -1,0 +1,13 @@
+# Dependencies
+node_modules/
+
+# Build intermediates (dist/ is intentionally tracked — it is the deploy artifact)
+# Local env files — never commit Firebase keys
+.env
+.env.*
+!.env.example
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.local

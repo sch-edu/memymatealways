@@ -1,19 +1,69 @@
-import { type KeyboardEvent, type MouseEvent, type ReactNode, createContext, useContext, useEffect, useMemo, useState } from 'react';
+import { type KeyboardEvent, type MouseEvent, type ReactNode, createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
-import { BookOpen, ChevronRight, CircleHelp, Code2, Copy, Flame, Gauge, Home as House, Link2, Moon, PencilLine, Play, Plus, RotateCcw, Settings, Share2, Sparkles, Sun, Timer, Trophy, Volume2, X } from 'lucide-react';
+import { AdSlot } from '@/components/ad-slot';
+import { AuthDialog, type AuthMode } from '@/components/auth-dialog';
+import { Splash } from '@/components/splash';
+import {
+  BookOpen,
+  CalendarClock,
+  ChevronLeft,
+  ChevronRight,
+  CircleHelp,
+  Code2,
+  Copy,
+  Download,
+  Flame,
+  Gauge,
+  Home as House,
+  Link2,
+  LogIn,
+  LogOut,
+  Moon,
+  PencilLine,
+  Play,
+  Plus,
+  RotateCcw,
+  Settings,
+  Share2,
+  Sparkles,
+  Sun,
+  Timer,
+  Trophy,
+  Volume2,
+  X,
+} from 'lucide-react';
 import { Link, Route, Switch, Router as WouterRouter, useLocation, useParams } from 'wouter';
 import type { User } from 'firebase/auth';
 import type { Card, DraftTopic, Knight, Theme, Topic } from '@/types';
-import { ensureAnonymousUser, firebaseConfigured, loadCloudKnights, loadSharedKnight, saveCloudKnight, saveSharedKnight, subscribeToFirebaseAuth } from '@/lib/firebase';
-import { playSound } from '@/lib/sounds';
+import {
+  firebaseConfigured,
+  isCloudUser,
+  loadCloudKnights,
+  loadSharedKnight,
+  saveCloudKnight,
+  saveSharedKnight,
+  signOutFirebase,
+  subscribeToFirebaseAuth,
+} from '@/lib/firebase';
+import { downloadBackup, getAccountInfo, type AccountInfo } from '@/lib/account';
+import {
+  getSoundSettings,
+  playSound,
+  setSoundEnabled as setEngineSoundEnabled,
+  setSoundVolume as setEngineSoundVolume,
+  subscribeToSoundSettings,
+  unlockAudio,
+  type SoundSettings,
+} from '@/lib/sounds';
 
 const queryClient = new QueryClient();
 const STORAGE_KEY = 'memy-mate-knights-v1';
 const THEME_KEY = 'memy-mate-theme-v1';
 const SHARED_KEY = 'memy-mate-shared-v1';
+const BANNER_DISMISSED_KEY = 'memy-mate-banner-dismissed-v1';
 
 const seededKnights: Knight[] = [
   {
@@ -79,16 +129,25 @@ type AppState = {
   knights: Knight[];
   addKnight: (knight: Knight) => void;
   updateKnight: (id: string, patch: Partial<Knight>) => void;
-  shareKnight: (knight: Knight) => Promise<string>;
+  shareKnight: (knight: Knight) => Promise<string | null>;
   theme: Theme;
   setTheme: (theme: Theme) => void;
   firebaseUser: User | null;
   firebaseReady: boolean;
+  authDialogOpen: boolean;
+  authMode: AuthMode;
+  openAuth: (mode?: AuthMode) => void;
+  closeAuth: () => void;
+  sound: SoundSettings;
+  setSoundEnabled: (enabled: boolean) => void;
+  setSoundVolume: (volume: number) => void;
+  account: AccountInfo;
+  backupNow: () => string;
 };
 const AppContext = createContext<AppState | null>(null);
 const useAppState = () => {
   const value = useContext(AppContext);
-  if (!value) throw new Error('MeMyMate state is unavailable');
+  if (!value) throw new Error('meMyMate state is unavailable');
   return value;
 };
 
@@ -142,6 +201,12 @@ async function copyText(text: string): Promise<void> {
   input.remove();
 }
 
+function initialsFor(user: User | null): string {
+  if (!user) return 'GU';
+  const source = user.email ?? 'ARCT';
+  return source.slice(0, 2).toUpperCase();
+}
+
 function LogoMark({ compact = false }: { compact?: boolean }) {
   return (
     <span className="brand" aria-label="MeMyMate home">
@@ -160,7 +225,7 @@ const navItems = [
 
 function Navigation() {
   const [location] = useLocation();
-  const { firebaseUser } = useAppState();
+  const { firebaseUser, openAuth } = useAppState();
   return (
     <>
       <aside className="sidebar">
@@ -174,9 +239,18 @@ function Navigation() {
         </nav>
         <div className="side-bottom">
           <Link href="/guide" className="button button-soft" data-testid="button-open-guide"><BookOpen size={15} /> How it works</Link>
+          {firebaseUser ? (
+            <button type="button" className="button button-ghost" onClick={() => void signOutFirebase()} data-testid="button-signout">
+              <LogOut size={15} /> Sign out
+            </button>
+          ) : (
+            <button type="button" className="button button-soft" onClick={() => openAuth('signin')} data-testid="button-open-auth">
+              <LogIn size={15} /> Sign in / Sign up
+            </button>
+          )}
           <div className="profile-chip">
-            <span className="avatar">{firebaseUser ? 'MM' : 'AS'}</span>
-            <span><strong>{firebaseUser ? 'Anonymous student' : 'Offline student'}</strong><small>{firebaseUser ? 'Firebase synced' : 'Device-only mode'}</small></span>
+            <span className="avatar">{initialsFor(firebaseUser)}</span>
+            <span><strong>{firebaseUser ? (firebaseUser.email ?? 'ARCT student') : 'Guest student'}</strong><small>{firebaseUser ? 'Cloud synced' : 'Device-only mode'}</small></span>
           </div>
         </div>
       </aside>
@@ -208,29 +282,41 @@ function Topbar({ current }: { current: string }) {
   );
 }
 
-function Splash() {
-  return (
-    <div className="splash" data-testid="status-splash">
-      <div>
-        <div className="splash-mark"><img src={`${import.meta.env.BASE_URL}arct-logo.png`} alt="ARCT" className="splash-logo" /></div>
-        <div className="splash-copy"><strong className="display">MeMyMate</strong><p>loading your study arena</p></div>
-      </div>
-    </div>
-  );
-}
-
 function Home() {
-  const { knights, shareKnight } = useAppState();
+  const { knights, shareKnight, account, firebaseUser, backupNow } = useAppState();
   const featured = knights[0];
   const totalCards = knights.reduce((sum, knight) => sum + getCards(knight).length, 0);
   const [sharedId, setSharedId] = useState('');
+  const [bannerHidden, setBannerHidden] = useState(() => {
+    try {
+      return window.sessionStorage.getItem(BANNER_DISMISSED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [backedUp, setBackedUp] = useState(false);
+  const dismissBanner = () => {
+    setBannerHidden(true);
+    try {
+      window.sessionStorage.setItem(BANNER_DISMISSED_KEY, '1');
+    } catch {
+      // Session storage unavailable — hide for this render only.
+    }
+  };
+  const handleBackup = () => {
+    backupNow();
+    setBackedUp(true);
+    window.setTimeout(() => setBackedUp(false), 3200);
+  };
   const handleShare = async (event: MouseEvent, knight: Knight) => {
     event.preventDefault();
     event.stopPropagation();
     try {
       const link = await shareKnight(knight);
+      if (!link) return; // Guests: the sign-up dialog is now open.
       await copyText(link);
       setSharedId(knight.id);
+      playSound('win');
       window.setTimeout(() => setSharedId(''), 2600);
     } catch {
       setSharedId('');
@@ -239,6 +325,22 @@ function Home() {
   return (
     <Shell>
       <Topbar current="Dashboard" />
+      {!bannerHidden && (
+        <section className="lifecycle-banner fade-in" data-testid="banner-lifecycle" role="note">
+          <span className="lifecycle-icon"><CalendarClock size={17} /></span>
+          <div className="lifecycle-copy">
+            <strong>MeMyMate runs on a 30-day account lifecycle.</strong>
+            <p>{firebaseUser ? 'Cloud accounts are kept for 30 days.' : 'Guest Knights live only on this device.'} Keep a copy of every deck with a one-tap JSON backup.</p>
+            <span className="lifecycle-days">DAY {String(account.dayOfCycle).padStart(2, '0')} OF 30 · {account.daysRemaining} DAY{account.daysRemaining === 1 ? '' : 'S'} REMAINING</span>
+          </div>
+          <button type="button" className="button button-primary" onClick={handleBackup} data-testid="button-backup-decks">
+            <Download size={14} /> {backedUp ? 'Backup saved!' : 'Back up all decks'}
+          </button>
+          <button type="button" className="lifecycle-dismiss" onClick={dismissBanner} aria-label="Hide backup reminder" data-testid="button-dismiss-banner">
+            <X size={14} />
+          </button>
+        </section>
+      )}
       <section className="hero-grid fade-in">
         <div>
           <div className="eyebrow">Your study arena</div>
@@ -266,7 +368,9 @@ function Home() {
           </Link>
         ))}
       </section>
-      <p className="share-note" aria-live="polite">{sharedId ? 'Share link copied. Anyone with the link can open a read-only preview.' : 'Share any Knight with a friend from its card.'}</p>
+      <p className="share-note" aria-live="polite">{sharedId ? 'Share link copied. Anyone with the link can open a read-only study preview.' : 'Share any Knight with a friend from its card.'}</p>
+
+      <AdSlot />
 
       <div className="section-head"><div><h2 className="display">Your rhythm</h2><p>A little consistency beats a perfect plan.</p></div></div>
       <section className="stats-row">
@@ -513,16 +617,16 @@ function PracticePage() {
       setRepeatIndex(0);
       setTimeLeft(0);
       setStatus('topic-intro');
-      playSound('transition');
+      playSound('levelup');
       return;
     }
     setStatus('complete');
     updateKnight(knight.id, { sessions: knight.sessions + 1, bestScore: Math.max(knight.bestScore, 100) });
-    playSound('complete');
+    playSound('fanfare');
   };
   const advance = () => {
     if (!card) return;
-    playSound('tap');
+    playSound('flip');
     if (status === 'memorize' && repeatIndex + 1 < repetitions) {
       setRepeatIndex((current) => current + 1);
       setTimeLeft(card.seconds);
@@ -539,7 +643,7 @@ function PracticePage() {
       setRepeatIndex(0);
       setTimeLeft(topic.cards[0].seconds);
       setStatus('test');
-      playSound('transition');
+      playSound('correct');
       return;
     }
     nextTopicOrComplete();
@@ -564,8 +668,8 @@ function PracticePage() {
         </div>
         {active && <div className="timer-card" data-testid="status-timer"><svg className="timer-ring" viewBox="0 0 100 100" aria-label={`${timeLeft} seconds remaining`}><circle className="timer-bg" cx="50" cy="50" r="45" /><circle className="timer-progress" cx="50" cy="50" r="45" strokeDasharray="283" strokeDashoffset={283 * (1 - progress)} /></svg><div className="timer-center"><strong>{timeLeft}</strong><span>seconds</span></div><span className="timer-topic">{status === 'test' ? 'test' : `repeat ${repeatIndex + 1}/${repetitions}`}</span></div>}
         <div className="screen-swap" key={`${topicIndex}-${status}-${cardIndex}-${repeatIndex}`}>
-          {status === 'topic-intro' && <button type="button" className="practice-card topic-gate" onClick={startTopic} data-testid="button-start-topic"><span className="topic-gate-mark"><Play size={22} fill="currentColor" /></span><span className="card-index">{topic.name}</span><h2>Start this topic</h2><span className="topic-gate-meta">{topic.cards.length} playcards · no time limit to begin</span></button>}
-          {active && <button type="button" className={`practice-card content-card ${status === 'test' ? 'test-card' : ''}`} onClick={advance} onKeyDown={handleCardKeyDown} aria-label="Tap when you have said the answer" data-testid="button-advance-card"><span className="practice-card-content">{status === 'memorize' ? card.answer : card.prompt}</span></button>}
+          {status === 'topic-intro' && <button type="button" className="practice-card topic-gate" onClick={startTopic} data-no-click-sound data-testid="button-start-topic"><span className="topic-gate-mark"><Play size={22} fill="currentColor" /></span><span className="card-index">{topic.name}</span><h2>Start this topic</h2><span className="topic-gate-meta">{topic.cards.length} playcards · no time limit to begin</span></button>}
+          {active && <button type="button" className={`practice-card content-card ${status === 'test' ? 'test-card' : ''}`} onClick={advance} onKeyDown={handleCardKeyDown} data-no-click-sound aria-label="Tap when you have said the answer" data-testid="button-advance-card"><span className="practice-card-content">{status === 'memorize' ? card.answer : card.prompt}</span></button>}
           {status === 'failed' && <div className="result fail"><div className="result-mark"><X size={27} /></div><h2 className="display">Time slipped away.</h2><p>Restart the Knight and try the topic again. The next attempt starts with a fresh clock.</p><button type="button" className="button button-primary" onClick={reset} data-testid="button-restart-failed"><RotateCcw size={15} /> Restart Knight</button></div>}
           {status === 'complete' && <div className="result"><div className="result-mark"><Trophy size={27} /></div><h2 className="display">Knight cleared.</h2><p>You completed all {total} playcards across {topics.length} topics.</p><button type="button" className="button button-primary" onClick={reset} data-testid="button-practice-again"><Play size={15} fill="currentColor" /> Run it again</button></div>}
         </div>
@@ -576,9 +680,61 @@ function PracticePage() {
   );
 }
 
+/** Read-only flip-through study mode for shared links. */
+function StudyDeck({ knight }: { knight: Knight }) {
+  const cards = getCards(knight);
+  const [index, setIndex] = useState(0);
+  const [revealed, setRevealed] = useState(false);
+  if (!cards.length) return null;
+  const safeIndex = Math.min(index, cards.length - 1);
+  const card = cards[safeIndex];
+  const reveal = () => {
+    setRevealed(true);
+    playSound('flip');
+  };
+  const goTo = (nextIndex: number) => {
+    setIndex(Math.max(0, Math.min(cards.length - 1, nextIndex)));
+    setRevealed(false);
+    playSound('click');
+  };
+  const advance = () => {
+    if (!revealed) {
+      reveal();
+      return;
+    }
+    if (safeIndex < cards.length - 1) {
+      goTo(safeIndex + 1);
+      return;
+    }
+    setIndex(0);
+    setRevealed(false);
+    playSound('transition');
+  };
+  return (
+    <section className="panel study-panel rise-in">
+      <h2>Study this Knight</h2>
+      <p>A public, read-only preview — flip each playcard and say the answer aloud. Nothing is saved or edited.</p>
+      <button type="button" className={`study-card${revealed ? ' revealed' : ''}`} onClick={advance} data-no-click-sound aria-label={revealed ? 'Next playcard' : 'Reveal answer'} data-testid="button-study-card">
+        <span className="study-label">{revealed ? 'Answer' : 'Cue'}</span>
+        <span className="study-count">{safeIndex + 1} / {cards.length}</span>
+        <span className="study-content">{revealed ? card.answer : card.prompt}</span>
+        <span className="study-hint">{revealed ? (safeIndex < cards.length - 1 ? 'Tap for the next playcard' : 'Tap to start over') : 'Tap to reveal the answer'}</span>
+      </button>
+      <div className="study-nav">
+        <button type="button" className="button button-ghost" onClick={() => goTo(safeIndex - 1)} disabled={safeIndex === 0} aria-label="Previous playcard">
+          <ChevronLeft size={14} /> Back
+        </button>
+        <button type="button" className="button button-ghost" onClick={() => goTo(safeIndex + 1)} disabled={safeIndex === cards.length - 1} aria-label="Next playcard">
+          Next <ChevronRight size={14} />
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function SharedPage() {
   const params = useParams<{ id: string }>();
-  const { addKnight, firebaseUser } = useAppState();
+  const { addKnight } = useAppState();
   const [knight, setKnight] = useState<Knight | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'missing'>('loading');
   useEffect(() => {
@@ -601,7 +757,22 @@ function SharedPage() {
       <Topbar current="Shared Knight" />
       {status === 'loading' && <div className="panel share-loading"><div className="loading-orbit" /><p>Opening the shared Knight…</p></div>}
       {status === 'missing' && <div className="result fail"><div className="result-mark"><Link2 size={27} /></div><h1 className="display">This link has expired.</h1><p>The Knight may have been removed or Firebase is not connected for this deployment.</p><Link href="/" className="button button-primary">Back to dashboard</Link></div>}
-      {status === 'ready' && knight && <div className="shared-layout fade-in"><section className="shared-hero"><div className="eyebrow">Shared Knight</div><h1 className="display">{knight.name}</h1><p>{knight.description}</p><div className="shared-meta"><span>{getTopics(knight).length} topics</span><span>{getCards(knight).length} playcards</span><span>{firebaseUser ? 'Firebase synced' : 'Read-only preview'}</span></div><div className="shared-actions"><button type="button" className="button button-primary" onClick={copyToCollection} data-testid="button-copy-shared-knight"><Copy size={15} /> Copy to my Knights</button><Link href={`/practice/${knight.id}`} className="button button-ghost">Preview practice</Link></div></section><section className="shared-topics">{getTopics(knight).map((topic) => <article className="shared-topic" key={topic.id}><span className="card-index">{topic.name}</span><h2>{topic.cards.length} playcards</h2><p>{topic.cards.slice(0, 2).map((card) => card.answer).join(' · ')}</p></article>)}</section></div>}
+      {status === 'ready' && knight && (
+        <div className="shared-layout fade-in">
+          <div>
+            <section className="shared-hero">
+              <div className="eyebrow">Shared Knight</div>
+              <h1 className="display">{knight.name}</h1>
+              <p>{knight.description}</p>
+              <div className="shared-meta"><span>{getTopics(knight).length} topics</span><span>{getCards(knight).length} playcards</span><span>Read-only study link</span></div>
+              <div className="shared-actions"><button type="button" className="button button-primary" onClick={copyToCollection} data-testid="button-copy-shared-knight"><Copy size={15} /> Copy to my Knights</button></div>
+            </section>
+            <StudyDeck knight={knight} />
+          </div>
+          <section className="shared-topics">{getTopics(knight).map((topic) => <article className="shared-topic" key={topic.id}><span className="card-index">{topic.name}</span><h2>{topic.cards.length} playcards</h2><p>{topic.cards.slice(0, 2).map((card) => card.answer).join(' · ')}</p></article>)}</section>
+        </div>
+      )}
+      <AdSlot compact />
     </Shell>
   );
 }
@@ -618,21 +789,78 @@ function GuidePage() {
         <article className="loop-card rise-in stagger-3"><span className="loop-number">04 / MOVE</span><h3>Change the scene</h3><p>Every topic ends with a screen transition and a new topic checkpoint, so the session stays easy to follow.</p></article>
         <section className="panel guide-wide rise-in"><h2>Knight Code</h2><p>Use a topic tag, then give each playcard an optional time and repeat count.</p><table className="syntax-table"><thead><tr><th>Write</th><th>What it does</th><th>Example</th></tr></thead><tbody><tr><td>&lt;topic1&gt;</td><td>Starts a topic. A Knight can have many.</td><td><span className="mono">&lt;topic1&gt;Cell biology&lt;/topic&gt;</span></td></tr><tr><td>&lt;k1 5&gt;</td><td>Creates a card with a 5 second timer.</td><td><span className="mono">&lt;k1 5&gt;What is ATP? =&gt; Cell energy&lt;/k&gt;</span></td></tr><tr><td>&lt;3/k&gt;</td><td>Repeats the card 3 consecutive times.</td><td><span className="mono">&lt;k1 5&gt;...&lt;3/k&gt;</span></td></tr><tr><td>Omitted values</td><td>Repeat defaults to 1. Time uses 100 characters = 5 seconds.</td><td><span className="mono">&lt;k1&gt;A long answer...&lt;/k&gt;</span></td></tr></tbody></table><div style={{ marginTop: 19 }}><Link href="/create" className="button button-primary" data-testid="button-try-language"><Code2 size={15} /> Try Knight Code</Link></div></section>
       </section>
+      <AdSlot compact />
     </Shell>
   );
 }
 
 function SettingsPage() {
-  const { theme, setTheme, firebaseUser, firebaseReady } = useAppState();
+  const { theme, setTheme, firebaseUser, firebaseReady, sound, setSoundEnabled, setSoundVolume, account, backupNow, openAuth } = useAppState();
+  const [backedUp, setBackedUp] = useState(false);
   const choices: { id: Theme; label: string; caption: string; icon: typeof Sun }[] = [{ id: 'light', label: 'Paper', caption: 'Bright and clear', icon: Sun }, { id: 'dark', label: 'Midnight', caption: 'Low light focus', icon: Moon }, { id: 'sunset', label: 'Apricot', caption: 'Warm and vivid', icon: Sparkles }];
+  const createdLabel = new Date(account.createdAt).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+  const handleExport = () => {
+    backupNow();
+    setBackedUp(true);
+    window.setTimeout(() => setBackedUp(false), 3200);
+  };
   return (
     <Shell>
       <Topbar current="Settings" />
-      <div className="page-title fade-in"><div className="eyebrow">Your study space</div><h1 className="display">Make it feel<br />like yours.</h1><p>Choose the atmosphere that makes opening a Knight feel like a small invitation, not another task.</p></div>
+      <div className="page-title fade-in"><div className="eyebrow">Your study space</div><h1 className="display">Make it feel<br />like yours.</h1><p>Choose the atmosphere, the sound and the account mode that make opening a Knight feel like a small invitation, not another task.</p></div>
       <div className="settings-layout">
         <section className="panel rise-in"><h2>Appearance</h2><p>Your theme is saved on this device.</p><div className="theme-grid">{choices.map(({ id, label, caption, icon: Icon }) => <button type="button" key={id} className={`theme-choice ${theme === id ? 'active' : ''}`} onClick={() => setTheme(id)} aria-pressed={theme === id} data-testid={`button-theme-${id}`}><div className={`theme-preview ${id}`}><span /></div><strong><Icon size={12} style={{ verticalAlign: 'middle', marginRight: 4 }} /> {label}</strong><small>{caption}</small></button>)}</div></section>
-        <section className="panel rise-in stagger-1"><h2>Profile</h2><p>Anonymous sign-in keeps your study space private without a password.</p><div className="profile-card"><div className="profile-avatar">{firebaseUser ? 'MM' : 'AS'}</div><div><h3>{firebaseUser ? 'Anonymous student' : 'Offline student'}</h3><p>{firebaseReady ? 'Firebase Authentication is active' : 'Local mode · add Firebase web config to sync'}</p></div></div><div className="auth-status"><span className={`status-dot ${firebaseUser ? 'online' : ''}`} />{firebaseUser ? 'Signed in anonymously' : 'Using this device only'}</div></section>
-        <section className="panel rise-in stagger-2"><h2>Practice preferences</h2><p>Small choices that shape the arena.</p><div className="tip-list"><div className="tip"><span className="tip-mark"><Timer size={13} /></span><div><strong>Default timer</strong><p>Each new card starts with 12 seconds. Edit the set later for a faster duel.</p></div></div><div className="tip"><span className="tip-mark"><Gauge size={13} /></span><div><strong>Recall first</strong><p>Answers stay hidden during practice. Your voice is the only shortcut.</p></div></div></div></section>
+        <section className="panel rise-in stagger-1">
+          <h2>Sound engine</h2>
+          <p>Every effect is synthesized live with the Web Audio API — zero audio files.</p>
+          <div className="sound-controls">
+            <div className="sound-row">
+              <div><strong>Sound effects</strong><small>Clicks, card flips, ticks, fanfares and more.</small></div>
+              <button type="button" className="sound-toggle" aria-pressed={sound.enabled} onClick={() => setSoundEnabled(!sound.enabled)} aria-label={sound.enabled ? 'Turn sound effects off' : 'Turn sound effects on'} data-testid="button-sound-toggle"><i /></button>
+            </div>
+            <div className="sound-row">
+              <div><strong>Volume</strong><small>{Math.round(sound.volume * 100)}% master volume.</small></div>
+              <input className="sound-slider" type="range" min="0" max="100" step="1" value={Math.round(sound.volume * 100)} onChange={(event) => setSoundVolume(Number(event.target.value) / 100)} aria-label="Sound effect volume" data-testid="input-sound-volume" />
+            </div>
+            <div className="sound-tests">
+              <button type="button" className="sound-test" data-no-click-sound onClick={() => playSound('flip')}>Flip</button>
+              <button type="button" className="sound-test" data-no-click-sound onClick={() => playSound('tick')}>Tick</button>
+              <button type="button" className="sound-test" data-no-click-sound onClick={() => playSound('correct')}>Correct</button>
+              <button type="button" className="sound-test" data-no-click-sound onClick={() => playSound('levelup')}>Level up</button>
+              <button type="button" className="sound-test" data-no-click-sound onClick={() => playSound('fanfare')}>Fanfare</button>
+            </div>
+          </div>
+        </section>
+        <section className="panel rise-in stagger-2">
+          <h2>Account &amp; 30-day lifecycle</h2>
+          <p>Accounts run on a 30-day lifecycle — export a JSON backup any time to keep your Knights forever.</p>
+          <div className="profile-card">
+            <div className="profile-avatar">{initialsFor(firebaseUser)}</div>
+            <div>
+              <h3>{firebaseUser ? (firebaseUser.email ?? 'ARCT student') : 'Guest student'}</h3>
+              <p>{firebaseUser ? 'Signed in with email · Firestore cloud sync on' : 'Guest mode · decks stored on this device only'}</p>
+            </div>
+          </div>
+          <div className="account-rows">
+            <div className="account-row"><span>Account created</span><strong>{createdLabel}</strong></div>
+            <div className="account-row"><span>Days active</span><strong>{account.daysActive} day{account.daysActive === 1 ? '' : 's'}</strong></div>
+            <div className="account-row"><span>Lifecycle</span><strong>Day {account.dayOfCycle} of 30 · {account.daysRemaining} left</strong></div>
+            <div className="account-row"><span>Storage</span><strong>{firebaseUser ? 'Cloud (Firestore)' : 'Local (localStorage)'}</strong></div>
+          </div>
+          <div className="account-cycle">
+            <div className="progress-track"><div className="progress-fill" style={{ width: `${(account.dayOfCycle / 30) * 100}%` }} /></div>
+          </div>
+          <div className="account-actions">
+            <button type="button" className="button button-primary" onClick={handleExport} data-testid="button-export-json"><Download size={14} /> {backedUp ? 'Backup saved!' : 'Export JSON backup'}</button>
+            {firebaseUser ? (
+              <button type="button" className="button button-ghost" onClick={() => void signOutFirebase()} data-testid="button-settings-signout"><LogOut size={14} /> Sign out</button>
+            ) : (
+              <button type="button" className="button button-ghost" onClick={() => openAuth('signup')} data-testid="button-settings-signup"><LogIn size={14} /> Create free account</button>
+            )}
+          </div>
+          <div className="auth-status"><span className={`status-dot ${firebaseUser ? 'online' : ''}`} />{firebaseUser ? 'Cloud sync active' : firebaseReady ? 'Guest mode · no Firestore I/O' : 'Local mode · add Firebase web config to sync'}</div>
+        </section>
+        <section className="panel rise-in stagger-3"><h2>Practice preferences</h2><p>Small choices that shape the arena.</p><div className="tip-list"><div className="tip"><span className="tip-mark"><Timer size={13} /></span><div><strong>Default timer</strong><p>Each new card starts with 12 seconds. Edit the set later for a faster duel.</p></div></div><div className="tip"><span className="tip-mark"><Gauge size={13} /></span><div><strong>Recall first</strong><p>Answers stay hidden during practice. Your voice is the only shortcut.</p></div></div></div></section>
       </div>
     </Shell>
   );
@@ -648,71 +876,144 @@ function RoutedErrorBoundary({ children }: { children: ReactNode }) {
 }
 
 function Router() {
-  const [location] = useLocation();
-  const [showSplash, setShowSplash] = useState(location === '/');
-  useEffect(() => {
-    if (location !== '/') { setShowSplash(false); return; }
-     const timer = window.setTimeout(() => setShowSplash(false), 3000);
-    return () => window.clearTimeout(timer);
-  }, [location]);
-  if (showSplash) return <Splash />;
+  const [showSplash, setShowSplash] = useState(true);
+  if (showSplash) return <Splash onDone={() => setShowSplash(false)} />;
   return <RoutedErrorBoundary><Switch><Route path="/" component={Home} /><Route path="/create" component={CreatePage} /><Route path="/practice/:id" component={PracticePage} /><Route path="/share/:id" component={SharedPage} /><Route path="/guide" component={GuidePage} /><Route path="/settings" component={SettingsPage} /><Route component={NotFound} /></Switch></RoutedErrorBoundary>;
 }
 
 function App() {
   const [knights, setKnights] = useState<Knight[]>(readKnights);
+  const knightsRef = useRef(knights);
   const [theme, setThemeState] = useState<Theme>(readTheme);
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [firebaseReady, setFirebaseReady] = useState(!firebaseConfigured);
-  useEffect(() => { window.localStorage.setItem(STORAGE_KEY, JSON.stringify(knights)); }, [knights]);
+  const [authDialogOpen, setAuthDialogOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<AuthMode>('signin');
+  const [sound, setSound] = useState<SoundSettings>(() => getSoundSettings());
+  const [account, setAccount] = useState<AccountInfo>(() => getAccountInfo());
+
+  // Single writer for knight state; keeps knightsRef current for cloud saves.
+  const commitKnights = (updater: (prev: Knight[]) => Knight[]) => {
+    setKnights((prev) => {
+      const next = updater(prev);
+      knightsRef.current = next;
+      return next;
+    });
+  };
+
+  // On-device storage: guests live here entirely; signed-in users keep a local mirror.
   useEffect(() => {
-    if (!firebaseConfigured) return;
-    const unsubscribe = subscribeToFirebaseAuth(async (user) => {
-      setFirebaseUser(user);
-      setFirebaseReady(true);
-      if (!user) return;
-      try {
-        const cloudKnights = await loadCloudKnights(user.uid);
-        if (cloudKnights.length) setKnights(cloudKnights);
-        else await Promise.all(knights.map((knight) => saveCloudKnight(user.uid, knight)));
-      } catch (error) {
-        console.warn('Firebase sync unavailable', error);
-      }
-    });
-    void ensureAnonymousUser().catch((error) => {
-      console.warn('Firebase anonymous sign-in unavailable', error);
-      setFirebaseReady(true);
-    });
-    return unsubscribe;
-  }, []);
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(knights));
+  }, [knights]);
+
   useEffect(() => {
     window.localStorage.setItem(THEME_KEY, theme);
     document.documentElement.classList.toggle('dark', theme === 'dark');
     document.documentElement.classList.toggle('theme-sunset', theme === 'sunset');
   }, [theme]);
+
+  // Firebase auth: only real (non-anonymous) accounts unlock cloud features.
+  useEffect(() => {
+    if (!firebaseConfigured) return;
+    const unsubscribe = subscribeToFirebaseAuth((user) => {
+      setFirebaseUser(isCloudUser(user) ? user : null);
+      setFirebaseReady(true);
+    });
+    return unsubscribe;
+  }, []);
+
+  // Cloud sync — signed-in users only. Guests never touch Firestore.
+  useEffect(() => {
+    if (!firebaseUser) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const cloudKnights = await loadCloudKnights(firebaseUser.uid);
+        if (cancelled) return;
+        const byId = new Map(knightsRef.current.map((knight) => [knight.id, knight]));
+        for (const cloudKnight of cloudKnights) byId.set(cloudKnight.id, cloudKnight);
+        const merged = Array.from(byId.values());
+        const cloudIds = new Set(cloudKnights.map((knight) => knight.id));
+        const localOnly = merged.filter((knight) => !cloudIds.has(knight.id));
+        commitKnights(() => merged);
+        if (localOnly.length) await Promise.all(localOnly.map((knight) => saveCloudKnight(firebaseUser.uid, knight)));
+      } catch (error) {
+        console.warn('Firebase sync unavailable', error);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [firebaseUser]);
+
+  // Account lifecycle follows the signed-in creation date when available.
+  useEffect(() => {
+    setAccount(getAccountInfo(firebaseUser?.metadata.creationTime ?? null));
+  }, [firebaseUser]);
+
+  // Live sound settings stay in sync with the engine.
+  useEffect(() => subscribeToSoundSettings(setSound), []);
+
+  // Unlock the AudioContext on the first gesture; add global click feedback.
+  useEffect(() => {
+    const unlock = () => unlockAudio();
+    window.addEventListener('pointerdown', unlock, { once: true });
+    window.addEventListener('keydown', unlock, { once: true });
+    const onClick = (event: globalThis.MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target || target.closest('[data-no-click-sound]')) return;
+      if (target.closest('button, a, [role="button"]')) playSound('click');
+    };
+    document.addEventListener('click', onClick);
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+      document.removeEventListener('click', onClick);
+    };
+  }, []);
+
+  const openAuth = (mode: AuthMode = 'signin') => {
+    setAuthMode(mode);
+    setAuthDialogOpen(true);
+  };
+  const closeAuth = () => setAuthDialogOpen(false);
+  const backupNow = () => downloadBackup(knightsRef.current, getAccountInfo(firebaseUser?.metadata.creationTime ?? null), firebaseUser ? 'cloud' : 'guest');
+
   const value = useMemo<AppState>(() => ({
     knights,
     addKnight: (knight) => {
-      setKnights((current) => [knight, ...current]);
+      commitKnights((current) => [knight, ...current]);
       if (firebaseUser) void saveCloudKnight(firebaseUser.uid, knight);
     },
     updateKnight: (id, patch) => {
-      setKnights((current) => current.map((knight) => knight.id === id ? { ...knight, ...patch } : knight));
-      const updated = knights.find((knight) => knight.id === id);
+      const updated = knightsRef.current.find((knight) => knight.id === id);
+      commitKnights((current) => current.map((knight) => knight.id === id ? { ...knight, ...patch } : knight));
       if (firebaseUser && updated) void saveCloudKnight(firebaseUser.uid, { ...updated, ...patch });
     },
     shareKnight: async (knight) => {
+      // Guests: sharing opens the sign-up dialog instead of touching Firestore.
+      if (!firebaseUser) {
+        openAuth('signup');
+        return null;
+      }
       saveLocalSharedKnight(knight);
-      if (firebaseUser) await saveSharedKnight(firebaseUser.uid, knight);
-      const link = new URL(sharePath(knight.id), window.location.origin).toString();
-      return link;
+      await saveSharedKnight(firebaseUser.uid, knight);
+      return new URL(sharePath(knight.id), window.location.origin).toString();
     },
     theme,
     setTheme: setThemeState,
     firebaseUser,
     firebaseReady,
-  }), [knights, theme, firebaseUser, firebaseReady]);
-  return <QueryClientProvider client={queryClient}><TooltipProvider><AppContext.Provider value={value}><WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}><Router /></WouterRouter><Toaster /></AppContext.Provider></TooltipProvider></QueryClientProvider>;
+    authDialogOpen,
+    authMode,
+    openAuth,
+    closeAuth,
+    sound,
+    setSoundEnabled: setEngineSoundEnabled,
+    setSoundVolume: setEngineSoundVolume,
+    account,
+    backupNow,
+  }), [knights, theme, firebaseUser, firebaseReady, authDialogOpen, authMode, sound, account]);
+
+  return <QueryClientProvider client={queryClient}><TooltipProvider><AppContext.Provider value={value}><WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}><Router /></WouterRouter><AuthDialog open={authDialogOpen} mode={authMode} onClose={closeAuth} onModeChange={setAuthMode} /><Toaster /></AppContext.Provider></TooltipProvider></QueryClientProvider>;
 }
 
 export default App;
