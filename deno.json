@@ -1,0 +1,6 @@
+{
+  "tasks": {
+    "build": "pnpm run build",
+    "start": "deno run --allow-net --allow-read serve.ts"
+  }
+}
