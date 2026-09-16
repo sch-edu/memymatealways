@@ -67,3 +67,18 @@ VITE_FIREBASE_APP_ID=...
 Without Firebase config the app runs fully in guest mode. Enable
 **Email/Password** sign-in in Firebase Authentication and deploy
 `firestore.rules` (`firebase deploy --only firestore:rules`).
+
+## Deploy
+
+The Vite build outputs to **`dist/public`** (not `dist`). All hosting configs
+are wired for that:
+
+| Host | Config | Notes |
+| --- | --- | --- |
+| Vercel | `vercel.json` | `buildCommand: npm run build`, `outputDirectory: dist/public`, SPA rewrites |
+| Netlify | `netlify.toml` | `npm run build`, publishes `dist/public`, SPA redirect |
+| Firebase Hosting | `firebase.json` | serves `dist/public` with SPA rewrites — run `npm run build` first |
+
+If you ever override the output directory in the host dashboard, make sure it
+points at `dist/public` (or change `build.outDir` in `vite.config.ts` to match).
+
